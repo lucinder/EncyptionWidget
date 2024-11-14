@@ -13,6 +13,7 @@ Saves raw bytes to a .bin if encrypting, or decrypted text to a .txt if decrypti
 #include <string>
 #include <iomanip>
 #include <direct.h>
+#include <limits.h>
 
 using namespace std;
 
@@ -31,6 +32,12 @@ HCRYPTPROV hCryptProv = NULL;
 HCRYPTKEY hKey = NULL;
 const DWORD blockSize = 16; // AES block size
 
+// files
+ifstream keyIn("key.bin", ios::binary);
+ifstream dataIn("data.bin", ios::binary);
+ofstream keyOut("key.bin", ios::binary);
+ofstream dataOut("data.bin", ios::binary);
+
 // helper method to print a BYTE array as hex
 void PrintHex(BYTE* data, int size) {
     cout << hex << setfill('0');
@@ -38,6 +45,14 @@ void PrintHex(BYTE* data, int size) {
         cout << setw(2) << static_cast<unsigned>(data[i]) << " ";
     }
     cout << ("\n");
+}
+
+// helper method to close all filestreams
+void CloseFiles(){
+    keyIn.close();
+    keyOut.close();
+    dataIn.close();
+    dataOut.close();
 }
 
 // helper method to print system errors
@@ -48,6 +63,7 @@ void PrintLastError(){
         nullptr, errorCode, 0, buf, 0, nullptr); // err to str
     cout << "Error " << errorCode << " " << (char*)buf << endl; // print error
     LocalFree(buf);
+    CloseFiles();
     exit(1);
 }
 
@@ -74,49 +90,45 @@ bool Decrypt(HCRYPTKEY &hKey, DWORD &dwDataLen, BYTE* &output){
 }
 
 // write a BYTE array to a file
-bool ExportDataToFile(string &filename, BYTE* &pbData, DWORD &size){
+bool ExportDataToFile(ofstream &fp, BYTE* &pbData, DWORD &size){
     if (DEBUG) cout << "DEBUG: Entered the ExportDataToFile method." << endl;
-    if (DEBUG) cout << "DEBUG: Exporting to " << filename << endl;
-    ofstream outFile(filename, ios::binary); // open file
-    if (!outFile) {
+    // if (DEBUG) cout << "DEBUG: Exporting to file." << endl;
+     // open file
+    if (!fp) {
         cout << "ERROR: An error occured when writing data to file." << endl;
         PrintLastError();
         return false;
     }
     if (DEBUG) cout << "DEBUG: Export Size: 0x" << size << endl;
-    outFile.write(reinterpret_cast<char*>(pbData), size);
+    fp.write(reinterpret_cast<char*>(pbData), size);
     // outFile.write(reinterpret_cast<char*>(pbData), size); // write to file
-    outFile.close();
     return true;
 }
 
 // import binary from file to BYTE array - currently broken
-bool ImportDataFromFile(string &filename, BYTE* &pbData, DWORD &readSize){
+bool ImportDataFromFile(ifstream &fp, BYTE* &pbData, DWORD &readSize){
     if (DEBUG) cout << "DEBUG: Entered the ImportDataFromFile method." << endl;
-    if (DEBUG) cout << "DEBUG: Importing from " << filename << "." << endl;
-    // TODO : fix soft crashing here. exits without explanation for inputs > 16 chars
-    char* cwd = _getcwd(NULL, 0);
-    if (DEBUG) cout << "DEBUG: Current working directory: " << cwd << endl;
-    ifstream inFile(filename, ios::binary | ios::ate);
-    if (DEBUG) cout << "DEBUG: Initialized input file." << endl;
-    if (!inFile) {
-        cout << "ERROR: An error occured when opening the file " << filename << "." << endl;
+    // if (DEBUG) cout << "DEBUG: Importing from file." << endl;
+    if (fp.fail()) {
+        cout << "ERROR: An error occured when opening the file." << endl;
         PrintLastError();
         return false;
     }
     if (DEBUG) cout << "DEBUG: Successfully loaded input file." << endl;
-    streamsize size = inFile.tellg();
+    streamsize size = fp.tellg();
     readSize = size;
-    if (DEBUG) cout << "DEBUG: Imported File Size: " << readSize << endl;
-    inFile.seekg(0, ios::beg);
-    pbData = new BYTE[size];
-    if (!inFile.read(reinterpret_cast<char*>(pbData), size)) {
-        cout << "ERROR: An error occured when reading data from file." << endl;
-        PrintLastError();
-        inFile.close();
+    if(size == 0){
+        cout << "WARN: File exists, but is empty. Exiting early." << endl;
         return false;
     }
-    inFile.close();
+    if (DEBUG) cout << "DEBUG: Imported File Size: " << readSize << endl;
+    fp.seekg(0, ios::beg);
+    pbData = new BYTE[size];
+    if (!fp.read(reinterpret_cast<char*>(pbData), size)) {
+        cout << "ERROR: An error occured when reading data from file." << endl;
+        PrintLastError();
+        return false;
+    }
     return true;
 }
 
@@ -133,6 +145,7 @@ bool ExportKey(HCRYPTKEY &hKey){
     // write key to file
     if (DEBUG) cout << "DEBUG: Key Length: 0x" << keyLength << endl;
     BYTE* pbData = new BYTE[keyLength];
+    if (DEBUG) cout << "Initialized pointer to key blob." << endl;
     if (!CryptExportKey(hKey, 0, PLAINTEXTKEYBLOB, 0, pbData, &keyLength)) {
         cout << "ERROR: An error occured when exporting key to BLOB." << endl;
         PrintLastError();
@@ -140,9 +153,8 @@ bool ExportKey(HCRYPTKEY &hKey){
     }
     cout << "Key: ";
     PrintHex(pbData, keyLength);
-    string fn = "key.bin";
     if (DEBUG) cout << "DEBUG: Exporting data." << endl;
-    if (!ExportDataToFile(fn, pbData, keyLength)) {
+    if (!ExportDataToFile(keyOut, pbData, keyLength)) {
         cout << "ERROR: Something went wrong while exporting data!" << endl;
         delete[] pbData;
         return false;
@@ -158,7 +170,7 @@ bool ImportKey(HCRYPTKEY &hKey){
     BYTE* pbData = NULL;
     DWORD keySize = 0;
     string fn = "key.bin";
-    if(!ImportDataFromFile(fn, pbData, keySize)){
+    if(!ImportDataFromFile(keyIn, pbData, keySize)){
         return false;
     }
     if (DEBUG) cout << "DEBUG: Imported Key: ";
@@ -178,13 +190,18 @@ bool ImportKey(HCRYPTKEY &hKey){
 }
 
 // encrypt an input string suing aes/rsa and static key, return true if successful
-bool EncryptOrDecrypt(char* input, const char* mode){ 
+bool EncryptOrDecrypt(char* &input, const char* &mode){ 
     DWORD dwDataLen = 0;
     BYTE* inputBytes = reinterpret_cast<unsigned char*>(input);
     if(*mode == 'f'){ // read from file
-        string fn = (strlen(input) > 0) ? input : "data.bin"; // get input path from argv if it exists
+        string fn = "data.bin";
+        // get input path from argv if it exists
+        if(strlen(input) > 0){
+            fn = input;
+            ifstream dataIn(fn, ios::binary);
+        }
         if (DEBUG) cout << "DEBUG: Import Filename = " << fn <<endl;
-        if(!ImportDataFromFile(fn,inputBytes,dwDataLen)){
+        if(!ImportDataFromFile(dataIn,inputBytes,dwDataLen)){
             return false;
         }
         if (DEBUG) cout << "DEBUG: Imported Data: ";
@@ -222,7 +239,7 @@ bool EncryptOrDecrypt(char* input, const char* mode){
             return false;
         }
     }
-    if (DEBUG) cout << "DEBUG: Successfully imported key." << endl;
+    if (DEBUG) cout << "DEBUG: Successfully got our key." << endl;
     if (DEBUG) cout << "DEBUG: Trying to encrypt or decrypt." << endl;
     // call encrypt or decrypt
     switch(*mode){
@@ -239,7 +256,7 @@ bool EncryptOrDecrypt(char* input, const char* mode){
             cout << "ERROR: Invalid operation. Please choose between 'e' (encrypt), 'd' (decrypt), or 'f' (auto decrypt from file)." << endl;
             break;
     }
-
+    if (DEBUG) cout << "DEBUG: Successfully encrypted or decrypted data." << endl;
     // key exporting to file!
     if(*mode == 'e') {
         if (!ExportKey(hKey)) { 
@@ -247,7 +264,7 @@ bool EncryptOrDecrypt(char* input, const char* mode){
             return false;
         }
     } // export key ONLY if we're encrypting
-
+    if (DEBUG) cout << "DEBUG: Successfully exported our key." << endl;
     CryptDestroyKey(hKey);
     CryptReleaseContext(hCryptProv, 0);
     cout << "Data: ";
@@ -255,16 +272,20 @@ bool EncryptOrDecrypt(char* input, const char* mode){
     else { cout << output << endl; }
 
     // encrypted output export to file
-    string fn = (*mode == 'e') ? "data.bin" : "data.txt";
+    string fn = "data.bin";
+    if(*mode != 'e'){
+        fn = "data.txt";
+        ofstream dataOut("data.txt");
+    }
     if (DEBUG) cout << "DEBUG: Export Filename = " << fn <<endl;
-    if (!ExportDataToFile(fn, output, dwBlockLen)) return false;
+    if (!ExportDataToFile(dataOut, output, dwBlockLen)) return false;
     cout << "Exported data to file." << endl;
     delete[] output;
     return true;
 }
 
 // main - take in stuff from argv and send it off to encrypt/decrypt
-int main(int argc, char *argv[]){
+int main(int argc, char* argv[]){
     if (argc < 2){
         cout << "Usage: EncryptionWidget <e|d|f> <input> [d]" << endl;
         return 0;
@@ -273,5 +294,6 @@ int main(int argc, char *argv[]){
     char* input = (char*)(argc > 2 ? argv[2] : "");
     DEBUG = (argc > 3 && *argv[3] == 'd') ? true : false;
     EncryptOrDecrypt(input, mode);
+    CloseFiles();
     return 0;
 }
