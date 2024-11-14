@@ -1,4 +1,4 @@
-**Usage: EncryptionWidget <e|d|f> <input> \[d]**
+**Usage: EncryptionWidget <e|d|f> \<input> \[d]**
 
 \<e|d|f|> = Encryption mode (encrypt, decrypt, or decrypt from file).
 
