@@ -94,17 +94,6 @@ HCRYPTKEY GetKey(HCRYPTPROV &hCryptProv){
     return hKey;
 }
 
-// remove padding after decrypting
-void RemovePadding(BYTE* &data, DWORD &dataLen) {
-    BYTE padByte = data[dataLen - 1]; // PKCS7 padding, the value of the padding byte indicates the number of bytes of padding
-    if (padByte > blockSize) {
-        cout << "ERROR: Invalid padding byte." << endl;
-        return;
-    }
-    dataLen -= padByte;  // Remove padding from the data length
-    if(DEBUG) cout << "DEBUG: New data length: " << dataLen << endl;
-}
-
 // encrypt and save to output buffer
 bool Encrypt(HCRYPTKEY &hKey, DWORD &dwDataLen, DWORD &dwBlockLen, BYTE* &pbData){
     if (DEBUG) cout << "DEBUG: Entered the Encrypt method." << endl;
@@ -119,15 +108,14 @@ bool Encrypt(HCRYPTKEY &hKey, DWORD &dwDataLen, DWORD &dwBlockLen, BYTE* &pbData
 // decrypt and save to output buffer
 bool Decrypt(HCRYPTKEY &hKey, DWORD &dwDataLen, BYTE* &pbData){
     if (DEBUG) cout << "DEBUG: Entered the Decrypt method." << endl;
+    if (DEBUG) cout << "DEBUG: Bytes to decrypt: 0x" << dwDataLen << endl;
     if(!CryptDecrypt(hKey, 0, TRUE, 0, pbData, &dwDataLen)){ // decrypt our data
         cout << "ERROR: An error occured when decrypting data." << endl;
         PrintLastError();
         return false;
     }
-    if (DEBUG) cout << "DEBUG: Buffer after decrypting (with padding): ";
+    if (DEBUG) cout << "DEBUG: Buffer after decrypting: ";
     if (DEBUG) PrintHex(pbData, dwDataLen);
-    RemovePadding(pbData, dwDataLen);
-    if (DEBUG) cout << "DEBUG: Successfully removed padding." << endl;
     return true;
 }
 
@@ -146,7 +134,7 @@ bool EncryptOrDecrypt(char* &input, const char* &mode){
         }
         inputStr = input; // reset input string
         inputBytes = reinterpret_cast<BYTE*>(input);
-        if (DEBUG) cout << "DEBUG: Bytes read: ";
+        if (DEBUG) cout << "DEBUG: Bytes read from argv: ";
         if (DEBUG) PrintHex(inputBytes, inputStr.size());
         dwDataLen = inputStr.size();
     } else {
@@ -157,6 +145,7 @@ bool EncryptOrDecrypt(char* &input, const char* &mode){
 
     if (DEBUG) cout << "DEBUG: Data bytes: ";
     if (DEBUG) PrintHex(inputBytes, dwDataLen);
+    if (DEBUG) cout << "DEBUG: Data Length: 0x" << dwDataLen << endl;
     // DWORD dwBlockLen = dwDataLen % 16 == 0 ? dwDataLen + 16 : ((dwDataLen + blockSize - 1) / blockSize) * blockSize; // get block length for encryption
     // trying something else for padding
     DWORD padLen = blockSize - (dwDataLen % blockSize);
@@ -165,15 +154,15 @@ bool EncryptOrDecrypt(char* &input, const char* &mode){
             padLen = blockSize;  // If data length is already a multiple, add one block of padding
         }
         dwBlockLen = dwDataLen + padLen;
+        if (DEBUG) cout << "DEBUG: Buffer Length: 0x" << dwBlockLen << endl;
     } else {
         dwBlockLen = dwDataLen;
     }
     
     BYTE* output = new BYTE[dwBlockLen];
-    if (DEBUG) cout << "DEBUG: Data Length: " << dwBlockLen << endl;
-    memset(output, padLen, dwBlockLen); // zero buffer for padding
+    memset(output, 0x00, dwBlockLen); // zero buffer for padding
     memcpy(output, inputBytes, dwDataLen); // copy input into the buffer
-    if (DEBUG) cout << "DEBUG: Buffer to encrypt: ";
+    if (DEBUG) cout << "DEBUG: Buffer to encrypt/decrypt: ";
     if (DEBUG) PrintHex(output, dwBlockLen);
     delete[] inputBytes;
 
@@ -200,7 +189,7 @@ bool EncryptOrDecrypt(char* &input, const char* &mode){
 
     cout << "Data: ";
     if(*mode == 'e'){ PrintHex(output, dwBlockLen); }
-    else { cout << string((char*)output, dwDataLen) << endl; }
+    else { cout << string((char*)output, dwBlockLen) << endl; }
 
     CryptDestroyKey(hKey);
     CryptReleaseContext(hCryptProv, 0);
