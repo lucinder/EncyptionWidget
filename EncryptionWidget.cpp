@@ -6,19 +6,17 @@ Currently using AES 128 with RSA.
 Saves raw bytes to a .bin if encrypting, or decrypted text to a .txt if decrypting.
 */
 
-#include <windows.h>
-#include <wincrypt.h>
 #include <iostream>
 #include <fstream>
 #include <string>
 #include <iomanip>
-#include <direct.h>
-#include <limits.h>
+#include <windows.h>
+#include <wincrypt.h>
 
 using namespace std;
 
 bool DEBUG = false; // debug flag for my sanity
-BYTE key[] = { // extra key in case this doesn't work
+BYTE keyIV[] = { // extra key in case this doesn't work
     0x69, 0x20, 0x6c, 0x6f, 0x76, 0x65, 0x20, 0x73, 0x74, 0x72, 0x61, 0x79, 0x63, 0x61, 0x74, 0x6a  // key
     };
 BYTE pbKeyBlob[] = { // hardcoded RSA key
@@ -28,31 +26,27 @@ BYTE pbKeyBlob[] = { // hardcoded RSA key
     0x10,0x00,0x00,0x00,                     // key length, in bytes
     0x69, 0x20, 0x6c, 0x6f, 0x76, 0x65, 0x20, 0x73, 0x74, 0x72, 0x61, 0x79, 0x63, 0x61, 0x74, 0x6a  // key iv
     };
-HCRYPTPROV hCryptProv = NULL;
-HCRYPTKEY hKey = NULL;
-const DWORD blockSize = 16; // AES block size
 
-// files
-ifstream keyIn("key.bin", ios::binary);
-ifstream dataIn("data.bin", ios::binary);
-ofstream keyOut("key.bin", ios::binary);
-ofstream dataOut("data.bin", ios::binary);
+struct aes128keyBlob
+{
+    BLOBHEADER hdr;
+    DWORD keySize;
+    BYTE bytes[16];
+} blob;
+
+const DWORD blockSize = 16; // AES block size
+DWORD keyLength = 28; // key length - hardcoded here
+string keyFilePath = "key.bin";
+string dataBinFilePath = "data.bin";
+string dataTxtFilePath = "data.txt";
 
 // helper method to print a BYTE array as hex
 void PrintHex(BYTE* data, int size) {
     cout << hex << setfill('0');
     for (int i = 0; i < size; i++) {
-        cout << setw(2) << static_cast<unsigned>(data[i]) << " ";
+        cout << setw(2) << static_cast<unsigned>(data[i]);
     }
     cout << ("\n");
-}
-
-// helper method to close all filestreams
-void CloseFiles(){
-    keyIn.close();
-    keyOut.close();
-    dataIn.close();
-    dataOut.close();
 }
 
 // helper method to print system errors
@@ -63,14 +57,58 @@ void PrintLastError(){
         nullptr, errorCode, 0, buf, 0, nullptr); // err to str
     cout << "Error " << errorCode << " " << (char*)buf << endl; // print error
     LocalFree(buf);
-    CloseFiles();
-    exit(1);
+    // exit(1);
+}
+
+HCRYPTPROV GetCryptContext(){
+    HCRYPTPROV hCryptProv = NULL;
+    if (DEBUG) cout << "DEBUG: Trying to get our crypt context." << endl;
+    if (!CryptAcquireContext(&hCryptProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) { // try to get our key container
+        cout << "ERROR: An error occured when trying to set up key container." << endl;
+        PrintLastError();
+        return NULL;
+    }
+    if (DEBUG) cout << "DEBUG: Successfully got crypt context." << endl;
+    return hCryptProv;
+}
+
+HCRYPTKEY GetKey(HCRYPTPROV &hCryptProv){
+    HCRYPTKEY hKey = NULL;
+    blob.hdr.bType = PLAINTEXTKEYBLOB;
+    blob.hdr.bVersion = CUR_BLOB_VERSION;
+    blob.hdr.reserved = 0;
+    blob.hdr.aiKeyAlg = CALG_AES_128;
+    blob.keySize = 16;
+    memcpy(blob.bytes, keyIV, 16);
+    if (!CryptImportKey(hCryptProv, (BYTE*)&blob, sizeof(aes128keyBlob), NULL, CRYPT_EXPORTABLE, &hKey)) {
+        cout << "ERROR: An error occured when trying to gemerate encryption key." << endl;
+        PrintLastError();
+        return NULL;
+    }
+    if (!CryptSetKeyParam(hKey, KP_IV, keyIV, 0)) {
+        cout << "ERROR: An error occured when trying to override encryption key contents." << endl;
+        PrintLastError();
+        return NULL;
+    }
+    if (DEBUG) cout << "DEBUG: Successfully got our key." << endl;
+    return hKey;
+}
+
+// remove padding after decrypting
+void RemovePadding(BYTE* &data, DWORD &dataLen) {
+    BYTE padByte = data[dataLen - 1]; // PKCS7 padding, the value of the padding byte indicates the number of bytes of padding
+    if (padByte > blockSize) {
+        cout << "ERROR: Invalid padding byte." << endl;
+        return;
+    }
+    dataLen -= padByte;  // Remove padding from the data length
+    if(DEBUG) cout << "DEBUG: New data length: " << dataLen << endl;
 }
 
 // encrypt and save to output buffer
-bool Encrypt(HCRYPTKEY &hKey, DWORD &dwDataLen, DWORD &dwBlockLen, BYTE* &output){
+bool Encrypt(HCRYPTKEY &hKey, DWORD &dwDataLen, DWORD &dwBlockLen, BYTE* &pbData){
     if (DEBUG) cout << "DEBUG: Entered the Encrypt method." << endl;
-    if(!CryptEncrypt(hKey, 0, TRUE, 0, output, &dwDataLen, dwBlockLen)){ // encrypt our data
+    if(!CryptEncrypt(hKey, 0, TRUE, 0, pbData, &dwDataLen, dwBlockLen)){ // encrypt our data
         cout << "ERROR: An error occured when encrypting data." << endl;
         PrintLastError();
         return false;
@@ -79,167 +117,72 @@ bool Encrypt(HCRYPTKEY &hKey, DWORD &dwDataLen, DWORD &dwBlockLen, BYTE* &output
 }
 
 // decrypt and save to output buffer
-bool Decrypt(HCRYPTKEY &hKey, DWORD &dwDataLen, BYTE* &output){
+bool Decrypt(HCRYPTKEY &hKey, DWORD &dwDataLen, BYTE* &pbData){
     if (DEBUG) cout << "DEBUG: Entered the Decrypt method." << endl;
-    if(!CryptDecrypt(hKey, 0, TRUE, 0, output, &dwDataLen)){ // decrypt our data
+    if(!CryptDecrypt(hKey, 0, TRUE, 0, pbData, &dwDataLen)){ // decrypt our data
         cout << "ERROR: An error occured when decrypting data." << endl;
         PrintLastError();
         return false;
     }
-    return true;
-}
-
-// write a BYTE array to a file
-bool ExportDataToFile(ofstream &fp, BYTE* &pbData, DWORD &size){
-    if (DEBUG) cout << "DEBUG: Entered the ExportDataToFile method." << endl;
-    // if (DEBUG) cout << "DEBUG: Exporting to file." << endl;
-     // open file
-    if (!fp) {
-        cout << "ERROR: An error occured when writing data to file." << endl;
-        PrintLastError();
-        return false;
-    }
-    if (DEBUG) cout << "DEBUG: Export Size: 0x" << size << endl;
-    fp.write(reinterpret_cast<char*>(pbData), size);
-    // outFile.write(reinterpret_cast<char*>(pbData), size); // write to file
-    return true;
-}
-
-// import binary from file to BYTE array - currently broken
-bool ImportDataFromFile(ifstream &fp, BYTE* &pbData, DWORD &readSize){
-    if (DEBUG) cout << "DEBUG: Entered the ImportDataFromFile method." << endl;
-    // if (DEBUG) cout << "DEBUG: Importing from file." << endl;
-    if (fp.fail()) {
-        cout << "ERROR: An error occured when opening the file." << endl;
-        PrintLastError();
-        return false;
-    }
-    if (DEBUG) cout << "DEBUG: Successfully loaded input file." << endl;
-    streamsize size = fp.tellg();
-    readSize = size;
-    if(size == 0){
-        cout << "WARN: File exists, but is empty. Exiting early." << endl;
-        return false;
-    }
-    if (DEBUG) cout << "DEBUG: Imported File Size: " << readSize << endl;
-    fp.seekg(0, ios::beg);
-    pbData = new BYTE[size];
-    if (!fp.read(reinterpret_cast<char*>(pbData), size)) {
-        cout << "ERROR: An error occured when reading data from file." << endl;
-        PrintLastError();
-        return false;
-    }
-    return true;
-}
-
-// export key to file
-bool ExportKey(HCRYPTKEY &hKey){
-    if (DEBUG) cout << "DEBUG: Entered the ExportKey method." << endl;
-    // get key length
-    DWORD keyLength = 0;
-    if (!CryptExportKey(hKey, 0, PLAINTEXTKEYBLOB, 0, nullptr, &keyLength)) {
-        cout << "ERROR: An error occured when getting key size." << endl;
-        PrintLastError();
-        return false;
-    }
-    // write key to file
-    if (DEBUG) cout << "DEBUG: Key Length: 0x" << keyLength << endl;
-    BYTE* pbData = new BYTE[keyLength];
-    if (DEBUG) cout << "Initialized pointer to key blob." << endl;
-    if (!CryptExportKey(hKey, 0, PLAINTEXTKEYBLOB, 0, pbData, &keyLength)) {
-        cout << "ERROR: An error occured when exporting key to BLOB." << endl;
-        PrintLastError();
-        return false;
-    }
-    cout << "Key: ";
-    PrintHex(pbData, keyLength);
-    if (DEBUG) cout << "DEBUG: Exporting data." << endl;
-    if (!ExportDataToFile(keyOut, pbData, keyLength)) {
-        cout << "ERROR: Something went wrong while exporting data!" << endl;
-        delete[] pbData;
-        return false;
-    }
-    cout << "Exported key to file.\n";
-    delete[] pbData;
-    return true;
-}
-
-// import key
-bool ImportKey(HCRYPTKEY &hKey){
-    if (DEBUG) cout << "DEBUG: Entered the ImportKey method." << endl;
-    BYTE* pbData = NULL;
-    DWORD keySize = 0;
-    string fn = "key.bin";
-    if(!ImportDataFromFile(keyIn, pbData, keySize)){
-        return false;
-    }
-    if (DEBUG) cout << "DEBUG: Imported Key: ";
-    if (DEBUG) PrintHex(pbData, keySize);
-    if (!CryptImportKey(hCryptProv, pbData, keySize, 0, CRYPT_EXPORTABLE, &hKey)) { // import pbdata to key object
-        cout << "WARN: Failed to import key from file. Building hardcoded key instead.\n";
-        if (DEBUG) cout << "DEBUG: Key size is " << sizeof(pbKeyBlob) << endl;
-        if (!CryptImportKey(hCryptProv, pbKeyBlob, sizeof(pbKeyBlob), 0, CRYPT_EXPORTABLE, &hKey)) { // import pbdata to key object
-            cout << "ERROR: An error occured when importing data to a key object." << endl;
-            PrintLastError();
-            delete[] pbData;
-            return false;
-        }
-    }
-    delete[] pbData;
+    if (DEBUG) cout << "DEBUG: Buffer after decrypting (with padding): ";
+    if (DEBUG) PrintHex(pbData, dwDataLen);
+    RemovePadding(pbData, dwDataLen);
+    if (DEBUG) cout << "DEBUG: Successfully removed padding." << endl;
     return true;
 }
 
 // encrypt an input string suing aes/rsa and static key, return true if successful
 bool EncryptOrDecrypt(char* &input, const char* &mode){ 
     DWORD dwDataLen = 0;
-    BYTE* inputBytes = reinterpret_cast<unsigned char*>(input);
-    if(*mode == 'f'){ // read from file
-        string fn = "data.bin";
-        // get input path from argv if it exists
-        if(strlen(input) > 0){
-            fn = input;
-            ifstream dataIn(fn, ios::binary);
+    DWORD dwBlockLen = 0;
+    string inputStr = input;
+    BYTE* inputBytes;
+    if(*mode == 'd'){ // decryption from raw text requires conversion to hex first
+        memset(input, 0, inputStr.length()); // zero our input
+        for(int i = 0; i < inputStr.length(); i+=2){
+            string byteStr = inputStr.substr(i, 2);
+            char byte = (char)strtol(byteStr.c_str(), NULL, 16);
+            input[i/2] = byte; // set byte of input
         }
-        if (DEBUG) cout << "DEBUG: Import Filename = " << fn <<endl;
-        if(!ImportDataFromFile(dataIn,inputBytes,dwDataLen)){
-            return false;
-        }
-        if (DEBUG) cout << "DEBUG: Imported Data: ";
-        if (DEBUG) PrintHex(inputBytes, dwDataLen);
-    } else if (*mode == 'd') {
-        dwDataLen = sizeof(inputBytes) + 1;
+        inputStr = input; // reset input string
+        inputBytes = reinterpret_cast<BYTE*>(input);
+        if (DEBUG) cout << "DEBUG: Bytes read: ";
+        if (DEBUG) PrintHex(inputBytes, inputStr.size());
+        dwDataLen = inputStr.size();
     } else {
-        dwDataLen = strlen(input) + 1;
+        inputBytes = reinterpret_cast<unsigned char*>(input);
+        dwDataLen = strlen(input);
+        // if(dwDataLen % 16 == 0) dwDataLen--;
     }
-    DWORD dwBlockLen = ((dwDataLen + blockSize - 1) / blockSize) * blockSize; // get block length for encryption
-    if (DEBUG) cout << "DEBUG: Data Length: 0x" << dwBlockLen << endl;
-    BYTE* output = new BYTE[dwDataLen];
-    memset(output, 0, dwBlockLen); // zero buffer for padding
-    memcpy(output, inputBytes, dwDataLen); // copy input into the buffer
 
-    if (DEBUG) cout << "DEBUG: Trying to get our crypt context." << endl;
-    if (!CryptAcquireContext(&hCryptProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) { // try to get our key container
-        cout << "ERROR: An error occured when trying to set up key container." << endl;
-        PrintLastError();
-        return false;
-    }
-    if (DEBUG) cout << "DEBUG: Successfully got crypt context." << endl;
-    if (DEBUG) cout << "DEBUG: Trying to import key." << endl;
-    if(!ImportKey(hKey)){
-        // generate a new key if we don't have one already - please use this for encryption only!
-        cout << "WARN: Import key failed. Generating a new key instead.\n";
-        if (!CryptGenKey(hCryptProv, CALG_AES_128, CRYPT_EXPORTABLE, &hKey)) {
-            cout << "ERROR: An error occured when trying to gemerate encryption key." << endl;
-            PrintLastError();
-            return false;
+    if (DEBUG) cout << "DEBUG: Data bytes: ";
+    if (DEBUG) PrintHex(inputBytes, dwDataLen);
+    // DWORD dwBlockLen = dwDataLen % 16 == 0 ? dwDataLen + 16 : ((dwDataLen + blockSize - 1) / blockSize) * blockSize; // get block length for encryption
+    // trying something else for padding
+    DWORD padLen = blockSize - (dwDataLen % blockSize);
+    if (*mode == 'e'){ // only add padding if we are encrypting
+        if (padLen == 0) {
+            padLen = blockSize;  // If data length is already a multiple, add one block of padding
         }
-        if (!CryptSetKeyParam(hKey, KP_IV, key, 0)) {
-            cout << "ERROR: An error occured when trying to override encryption key contents." << endl;
-            PrintLastError();
-            return false;
-        }
+        dwBlockLen = dwDataLen + padLen;
+    } else {
+        dwBlockLen = dwDataLen;
     }
-    if (DEBUG) cout << "DEBUG: Successfully got our key." << endl;
+    
+    BYTE* output = new BYTE[dwBlockLen];
+    if (DEBUG) cout << "DEBUG: Data Length: " << dwBlockLen << endl;
+    memset(output, padLen, dwBlockLen); // zero buffer for padding
+    memcpy(output, inputBytes, dwDataLen); // copy input into the buffer
+    if (DEBUG) cout << "DEBUG: Buffer to encrypt: ";
+    if (DEBUG) PrintHex(output, dwBlockLen);
+    delete[] inputBytes;
+
+    // get context
+    HCRYPTPROV hCryptProv = GetCryptContext();
+
+    // get key
+    HCRYPTKEY hKey = GetKey(hCryptProv);
+    
     if (DEBUG) cout << "DEBUG: Trying to encrypt or decrypt." << endl;
     // call encrypt or decrypt
     switch(*mode){
@@ -247,39 +190,20 @@ bool EncryptOrDecrypt(char* &input, const char* &mode){
             Encrypt(hKey, dwDataLen, dwBlockLen, output);
             break;
         case 'd':
-            Decrypt(hKey, dwDataLen, output);
-            break;
-        case 'f':
-            Decrypt(hKey, dwDataLen, output);
+            Decrypt(hKey, dwBlockLen, output);
             break;
         default:
-            cout << "ERROR: Invalid operation. Please choose between 'e' (encrypt), 'd' (decrypt), or 'f' (auto decrypt from file)." << endl;
+            cout << "ERROR: Invalid operation. Please choose between 'e' (encrypt) or 'd' (decrypt)." << endl;
             break;
     }
     if (DEBUG) cout << "DEBUG: Successfully encrypted or decrypted data." << endl;
-    // key exporting to file!
-    if(*mode == 'e') {
-        if (!ExportKey(hKey)) { 
-            cout << "ERROR: An error occurred when exporting key." << endl;
-            return false;
-        }
-    } // export key ONLY if we're encrypting
-    if (DEBUG) cout << "DEBUG: Successfully exported our key." << endl;
+
+    cout << "Data: ";
+    if(*mode == 'e'){ PrintHex(output, dwBlockLen); }
+    else { cout << string((char*)output, dwDataLen) << endl; }
+
     CryptDestroyKey(hKey);
     CryptReleaseContext(hCryptProv, 0);
-    cout << "Data: ";
-    if(*mode == 'e'){ PrintHex(output, strlen(input)); }
-    else { cout << output << endl; }
-
-    // encrypted output export to file
-    string fn = "data.bin";
-    if(*mode != 'e'){
-        fn = "data.txt";
-        ofstream dataOut("data.txt");
-    }
-    if (DEBUG) cout << "DEBUG: Export Filename = " << fn <<endl;
-    if (!ExportDataToFile(dataOut, output, dwBlockLen)) return false;
-    cout << "Exported data to file." << endl;
     delete[] output;
     return true;
 }
@@ -287,13 +211,12 @@ bool EncryptOrDecrypt(char* &input, const char* &mode){
 // main - take in stuff from argv and send it off to encrypt/decrypt
 int main(int argc, char* argv[]){
     if (argc < 2){
-        cout << "Usage: EncryptionWidget <e|d|f> <input> [d]" << endl;
+        cout << "Usage: EncryptionWidget <e|d> <input> [d]" << endl;
         return 0;
     }
     const char* mode = argv[1];
     char* input = (char*)(argc > 2 ? argv[2] : "");
     DEBUG = (argc > 3 && *argv[3] == 'd') ? true : false;
     EncryptOrDecrypt(input, mode);
-    CloseFiles();
     return 0;
 }
